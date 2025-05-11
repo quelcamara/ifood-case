@@ -2,7 +2,14 @@ import numpy as np
 import pandas as pd
 
 from typing import List
+from lightgbm import LGBMClassifier
+from sklearn.metrics import roc_auc_score
+from sklearn.inspection import permutation_importance
+from sklearn.calibration import CalibratedClassifierCV
+
 from src.preprocess import multilabel_onehot_encode
+from src.plots import plot_feature_importance
+from loguru import logger
 
 
 def built_target(data: pd.DataFrame) -> pd.DataFrame:
@@ -159,3 +166,87 @@ def unify_modeling_dataset(
         .merge(engagement_feats, on="account_id")
         .merge(profile_offer_target, on=["account_id", "offer_id"])
     )
+
+
+def get_baseline_logloss(y: pd.Series):
+    """
+    """
+    p0 = y.value_counts(dropna=False, normalize=True).get(0)  # negative class proportion
+    p1 = y.value_counts(dropna=False, normalize=True).get(1)  # positive class proportion
+
+    baseline_log_loss = -(p1 * np.log(p1) + p0 * np.log(p0))
+    logger.info(f"Baseline LogLoss={baseline_log_loss:.4f}")
+
+
+def feature_selection(
+        data: pd.DataFrame, 
+        features: List[str], 
+        target: str
+    ) -> pd.DataFrame:
+    """
+    """
+    X, y = data[features], data[target]
+
+    train_end = int(len(X) * 0.6) # 60% para treino
+    calib_end = int(len(X) * 0.8) # 20% para calibração e 20% para teste
+
+    X_train, y_train = X.iloc[:train_end], y.iloc[:train_end] # Conjunto para treinar
+    X_calib, y_calib = X.iloc[train_end:calib_end], y.iloc[train_end:calib_end] # Conjunto para calibrar
+    X_valid, y_valid = X.iloc[calib_end:], y.iloc[calib_end:] # Conjunto para testar
+
+    params_ = {"n_estimators": 60}
+
+    lgbm = LGBMClassifier(**params_, random_state=42)
+    lgbm.fit(X_train, y_train)
+
+    # Calibrando o modelo
+    model_calib = CalibratedClassifierCV(lgbm, method="isotonic", cv="prefit")
+    model_calib.fit(X_calib, y_calib)
+
+    y_train_pred = model_calib.predict_proba(X_train)[:, 1]
+    y_test_pred = model_calib.predict_proba(X_valid)[:, 1]
+
+    auc_train = roc_auc_score(y_train, y_train_pred)
+    auc_test = roc_auc_score(y_valid, y_test_pred)
+
+    logger.info(f"Train AUC: {auc_train:.4f}")
+    logger.info(f"Valid AUC: {auc_test:.4f}")
+
+    # Calculando a importância por permutação
+    perm_importance = permutation_importance(
+        lgbm, X_valid, y_valid, n_repeats=30, random_state=42, scoring="roc_auc"
+    )
+    # Ordenando as variáveis por importância média
+    sorted_importances = sorted(
+        zip(X_train.columns, perm_importance.importances_mean), 
+        key=lambda x: x[1], 
+        reverse=True
+    )
+
+    feats_neutral = {}
+    feats_positive = {}
+    feats_negative = {}
+
+    for feature, importance in sorted_importances:    
+        if importance > 0:
+            feats_positive[feature] = importance
+        elif importance == 0:
+            feats_neutral[feature] = importance
+        else:
+            feats_negative[feature] = importance
+
+    logger.success("POSITIVE IMPORTANCE:")
+    for feat, impact in feats_positive.items():
+        logger.success(f"{impact:.6f}: {feat}")
+
+    logger.debug("NO IMPORTANCE:")
+    for feat, impact in feats_neutral.items():
+        logger.debug(f"{impact:.6f}: {feat}")
+    
+    logger.warning("NEGATIVE IMPORTANCE:")
+    for feat, impact in feats_negative.items():
+        logger.warning(f"{impact:.6f}: {feat}")
+
+    plot_feature_importance(X=X_train, importance_values=perm_importance)
+    
+    return list(feats_positive.keys())
