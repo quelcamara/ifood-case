@@ -32,9 +32,13 @@ def preprocess_transactions_info(data: pd.DataFrame) -> pd.DataFrame:
 def multilabel_onehot_encode(data: pd.DataFrame, column: str) -> pd.DataFrame:
     # One-hot de multilabels
     mlb = MultiLabelBinarizer()
+    original_index = data.index
 
-    encoded = mlb.fit_transform(data[column])
-    df = pd.DataFrame(encoded, columns=[f"{column}_{c}" for c in mlb.classes_])
+    # Substitui nulos temporariamente
+    values = data[column].apply(lambda x: x if isinstance(x, list) else [])
+
+    encoded = mlb.fit_transform(values)
+    df = pd.DataFrame(encoded, columns=[f"{column}_{c}" for c in mlb.classes_], index=original_index)
 
     return df
 

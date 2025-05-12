@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from typing import List
+from typing import List, Dict
 from lightgbm import LGBMClassifier
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import roc_auc_score, roc_curve, recall_score, precision_score
 from sklearn.inspection import permutation_importance
 from sklearn.calibration import CalibratedClassifierCV
 
@@ -28,199 +28,217 @@ def built_target(data: pd.DataFrame) -> pd.DataFrame:
     return dataf
 
 
-def calculate_days_between_same_events(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    """
-    dataf = data.copy()
-    dataf["delta_days_between_event"] = np.nan
+def rolling_agg(series, values, agg_func, window_size):
+    """Aplica agregação rolling baseada em dias, com shift para evitar vazamento."""
+    result = []
+    for i in range(len(series)):
+        t0 = series.iloc[i]
+        mask = (series < t0) & (series >= t0 - window_size)
+        vals = values[mask]
+        result.append(agg_func(vals) if len(vals) > 0 else np.nan)
+        
+    return pd.Series(result, index=series.index)
 
-    # Calcula a média de dias entre eventos do mesmo tipo defasando o evento
+
+def calculate_days_between_same_events(data: pd.DataFrame, event_windows: dict) -> pd.DataFrame:
+    dataf = data.copy()
+
+    # Garante ordenação
+    dataf = dataf.sort_values(by=["account_id", "event", "time_since_test_start"]).reset_index()
+
+    result_rows = []
+
     for (account, event), group in dataf.groupby(["account_id", "event"]):
-        # Calcula as diferenças entre eventos consecutivos
-        diffs = group["time_since_test_start"].diff()
+        window_size = event_windows.get(event)
+        if window_size is None:
+            continue  # pula eventos que não estão no dicionário
 
-        # Calcula a média cumulativa defasada para não usar eventos futuros 
-        expanding_mean = diffs.expanding().mean().shift(1)
-        dataf.loc[group.index, "delta_days_between_event"] = expanding_mean
+        group = group.copy()
+        times = group["time_since_test_start"].values
+        indices = group["index"].values
+        avg_diffs = []
 
-    # # Calcula a média de dias entre eventos do mesmo tipo
-    avg_days_between_event = (
-        dataf[["account_id", "event", "delta_days_between_event"]]
-        .dropna().groupby(["account_id", "event"])
-        .mean().reset_index()
-    )
-    # Pivota os resultados para uma linha por `account_id``
-    avg_days_pivot = avg_days_between_event.pivot(
-        index="account_id", columns="event", values="delta_days_between_event"
-    )
-    # Renomeia colunas e ajusta índice
-    avg_days_between_event = (
-        avg_days_pivot[["1-offer received", "2-offer viewed", "3-offer completed"]]
-        .rename(columns={
-            "1-offer received": "avg_days_offers_received",
-            "2-offer viewed": "avg_days_offers_viewed",
-            "3-offer completed": "avg_days_offers_completed"
-        }).reset_index()
-        .rename_axis(None, axis=1)
-        .reset_index(drop=True)
-    )
-    # Une resultado com dados originais
-    dataf = dataf.merge(
-        avg_days_between_event, on=["account_id"], how="left"
-    )
-    return dataf.drop(columns="delta_days_between_event")
+        for i in range(len(times)):
+            t0 = times[i]
 
+            # eventos anteriores dentro da janela de 15 dias
+            mask = (times < t0) & (times >= t0 - window_size)
+            prev_times = times[mask]
 
-def calculate_days_between_receiving_viewing(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    """
-    dataf = data.copy()
-    # Consultando eventos de interesse
-    received = dataf[dataf["event"] == "1-offer received"]
-    viewed = dataf[dataf["event"] == "2-offer viewed"]
+            # calcula diffs consecutivos
+            if len(prev_times) >= 2:
+                deltas = np.diff(prev_times)
+                avg_diffs.append(np.mean(deltas))
+            else:
+                avg_diffs.append(np.nan)
 
-    received = received.rename(columns={"time_since_test_start": "received_time"})
-    viewed = viewed.rename(columns={"time_since_test_start": "viewed_time"})
+        col_ = event.split("-")[1]
+        # salva os resultados diretamente
+        temp_result = pd.DataFrame({
+            "index": indices,
+            f"avg_days_between_event_{col_}_{window_size}d": avg_diffs
+        })
+        result_rows.append(temp_result)
 
-    # Ordenada pela coluna de tempo para o `merge_asof`
-    received = received.sort_values("received_time")
-    viewed = viewed.sort_values("viewed_time")
+    # junta os resultados
+    final = pd.concat(result_rows).set_index("index").sort_index()
 
-    # Mergeia alinhando a visualização imediatamente após cada recebimento
-    # Estratificado por pessoa e por oferta
-    pairs = pd.merge_asof(
-        received,
-        viewed,
-        left_on="received_time",
-        right_on="viewed_time",
-        by=["account_id", "offer_id"],
-        direction="forward",
-        suffixes=("_received", "_viewed")
-    )
-    # Diferença de dias entre receber e vizualizar
-    pairs["delta_received_view"] = pairs["viewed_time"] - pairs["received_time"]
-
-    # Removendo casos de inconsistência
-    pairs = pairs[pairs["delta_received_view"] >= 0]
-
-    avg_days_between_received_view = (
-        pairs.groupby("account_id")["delta_received_view"].mean()
-        .reset_index(name="avg_days_between_received_view")
-    )
-    dataf = dataf.merge(avg_days_between_received_view, on="account_id", how="left")
-    data = data.sort_values(["account_id", "time_since_test_start", "event"]).reset_index(drop=True)
+    # junta ao dataframe original
+    dataf = dataf.set_index("index")
+    dataf = pd.concat([dataf, final], axis=1).reset_index(drop=True)
 
     return dataf
 
 
-def build_customer_features(data: pd.DataFrame, agg_columns: List[str]) -> pd.DataFrame:
+def calculate_days_between_receiving_viewing(data: pd.DataFrame, agg_columns, window_size: int = 30) -> pd.DataFrame:
+    dataf = data.copy()
+    dataf = dataf.sort_values(by=agg_columns + ["time_since_test_start"]).reset_index(drop=False)  # preserva índice original
+
+    results = []
+
+    for group_keys, g in dataf.groupby(agg_columns):
+        g = g.copy()
+
+        # Separando eventos
+        received = g[g["event"] == "1-offer received"].copy()
+        viewed = g[g["event"] == "2-offer viewed"].copy()
+
+        received = received.rename(columns={"time_since_test_start": "received_time"})
+        viewed = viewed.rename(columns={"time_since_test_start": "viewed_time"})
+
+        received = received.sort_values("received_time")
+        viewed = viewed.sort_values("viewed_time")
+
+        # Faz merge por offer_id (mesmo grupo)
+        pairs = pd.merge_asof(
+            received,
+            viewed,
+            left_on="received_time",
+            right_on="viewed_time",
+            by=["offer_id"],
+            direction="forward",
+            suffixes=("_received", "_viewed")
+        )
+        # Calcula delta
+        pairs["delta_received_view"] = pairs["viewed_time"] - pairs["received_time"]
+        pairs = pairs[pairs["delta_received_view"] >= 0].copy()
+
+        # Rolling média para cada ponto de tempo no grupo
+        rolling_avg = []
+        for i in range(len(g)):
+            t0 = g.iloc[i]["time_since_test_start"]
+            mask = (pairs["received_time"] < t0) & (pairs["received_time"] >= t0 - window_size)
+            avg_delta = pairs.loc[mask, "delta_received_view"].mean() if not pairs.loc[mask].empty else np.nan
+            rolling_avg.append(avg_delta)
+
+        g["avg_days_received_view_30d"] = rolling_avg
+        results.append(g)
+
+    final_df = pd.concat(results, axis=0)
+    final_df = final_df.sort_values("index").set_index("index").sort_index()  # restaura índice original
+
+    return final_df.reset_index(drop=True)
+
+
+def build_customer_features(data: pd.DataFrame, agg_columns: List[str], window_size: int = 7) -> pd.DataFrame:
     """
     """
     dataf = data.copy()
+    dataf = dataf.sort_values(by=agg_columns + ["time_since_test_start"])
 
-    # Features que precisam ser defasadas
-    dataf["avg_ticket"] = dataf.groupby(agg_columns)["amount"].expanding().mean().shift(1).reset_index(level=0, drop=True)  
-    dataf["total_amount"] = dataf.groupby(agg_columns)["amount"].expanding().sum().shift(1).reset_index(level=0, drop=True)   
+    grouped = dataf.groupby(agg_columns)
 
-    dataf["days_to_first_interaction"] = dataf.groupby(agg_columns)["time_since_test_start"].transform(lambda x: x.expanding().min().shift(1))
-    dataf["day_of_last_interaction"] = dataf.groupby(agg_columns)["time_since_test_start"].transform(lambda x: x.expanding().max().shift(1))
+    dataf[f"avg_ticket_{window_size}d"] = grouped.apply(lambda g: rolling_agg(
+        g["time_since_test_start"], g["amount"], np.mean, window_size
+    )).reset_index(level=0, drop=True).T
 
-    # Features do cliente
-    customer_feats = dataf.groupby(agg_columns).agg(
-        age=("age", "first"), 
-        gender=("gender", "first"), 
-        credit_card_limit=("credit_card_limit", "first"),
-        registered_on=("registered_on", "first"),
-        unique_offers=("offer_id", "nunique"),                               # ofertas únicas
-        avg_ticket=("avg_ticket", "last"),                                   # ticket médio
-        total_amount=("total_amount", "last"),                               # gasto total
-        days_to_first_interaction=("days_to_first_interaction", "first"),    # dias para o primeiro evento
-        day_of_last_interaction=("day_of_last_interaction", "last"),         # dia do último evento
-        avg_days_offers_received=("avg_days_offers_received", "first"),      # média de dias entre ofertas recebidas
-        avg_days_offers_viewed=("avg_days_offers_viewed", "first"),          # média de dias entre ofertas vizualizadas
-        avg_days_offers_completed=("avg_days_offers_completed", "first")     # média de dias entre ofertas completadas
-    ).reset_index()
+    dataf[f"total_amount_{window_size}d"] = grouped.apply(lambda g: rolling_agg(
+        g["time_since_test_start"], g["amount"], np.sum, window_size
+    )).reset_index(level=0, drop=True).T
 
     # One-hot encoding feature
-    customer_feats = pd.get_dummies(customer_feats, columns=["gender"], dummy_na=True) 
+    dataf = pd.get_dummies(dataf, columns=["gender"], dummy_na=True) 
+    dataf = dataf.sort_values(["account_id", "time_since_test_start", "event"]).reset_index(drop=True)
     
-    return customer_feats
+    return dataf
 
 
-def build_offer_features(data: pd.DataFrame, agg_columns: List[str]) -> pd.DataFrame:
+def build_offer_features(data: pd.DataFrame) -> pd.DataFrame:
     """
     """
     # Features da oferta
-    offer_feats = data.groupby(agg_columns).agg(
-        offer_type=("offer_type", "first"),
-        avg_days_between_received_view=("avg_days_between_received_view", "first"),
-        event=("event", "unique"),
-        channels=("channels", "first"),
-        n_canais=("channels", lambda x: x.explode().nunique()),
-    ).reset_index()
-
     # One-hot encoding features
     # Obs: Remover um label caso seja usado modelo de regressão
-    offer_feats = pd.get_dummies(offer_feats, columns=["offer_type"]) 
-    event_encoded = multilabel_onehot_encode(data=offer_feats, column="event")
+    offer_feats = pd.get_dummies(data, columns=["offer_type"]) 
+    offer_feats = pd.get_dummies(offer_feats, columns=["event"])
     channels_encoded = multilabel_onehot_encode(data=offer_feats, column="channels")
 
-    return pd.concat(
-        [offer_feats.drop(columns=["channels", "event"]), event_encoded, channels_encoded]
+    offer_feats = pd.concat(
+        [offer_feats.drop(columns=["channels"]), channels_encoded]
         , axis=1
     )
+    return offer_feats.sort_values(["account_id", "time_since_test_start"]).reset_index(drop=True)
 
 
-def build_engagement_features(data: pd.DataFrame, agg_columns: List[str]) -> pd.DataFrame:
-    """
-    """
+def build_engagement_features(data: pd.DataFrame, agg_columns: List[str], window_size: int = 15) -> pd.DataFrame:
     dataf = data.copy()
+    dataf = dataf.sort_values(by=agg_columns + ["time_since_test_start"])
 
-    # Percentual de cada tipo de oferta até o momento atual
-    dataf["pct_type_bogo"] = dataf.groupby(agg_columns)["offer_type_bogo"].transform(lambda x: x.expanding().mean().shift(1))
-    dataf["pct_type_discount"] = dataf.groupby(agg_columns)["offer_type_discount"].transform(lambda x: x.expanding().mean().shift(1))
-    dataf["pct_type_informational"] = dataf.groupby(agg_columns)["offer_type_informational"].transform(lambda x: x.expanding().mean().shift(1))
+    features = {
+        f"pct_type_bogo_{window_size}d": "offer_type_bogo",
+        f"pct_type_discount_{window_size}d": "offer_type_discount",
+        f"pct_type_informational_{window_size}d": "offer_type_informational",
+        f"pct_viewed_offers_{window_size}d": "event_2-offer viewed",
+        f"pct_completed_offers_{window_size}d": "event_3-offer completed",
+        f"pct_channel_email_{window_size}d": "channels_email",
+        f"pct_channel_mobile_{window_size}d": "channels_mobile",
+        f"pct_channel_social_{window_size}d": "channels_social",
+        f"pct_channel_web_{window_size}d": "channels_web",
+    }
+    grouped = dataf.groupby(agg_columns)
 
-    # Engajamento com eventos
-    dataf["pct_viewed_offers"] = dataf.groupby(agg_columns)["event_2-offer viewed"].transform(lambda x: x.expanding().mean().shift(1))
-    dataf["pct_completed_offers"] = dataf.groupby(agg_columns)["event_3-offer completed"].transform(lambda x: x.expanding().mean().shift(1))
+    for new_col, base_col in features.items():
+        dataf[new_col] = grouped.apply(lambda g: rolling_agg(
+            g["time_since_test_start"], g[base_col], np.mean, window_size
+        )).reset_index(level=0, drop=True).T
 
-    # Canais utilizados
-    dataf["pct_channel_email"] = dataf.groupby(agg_columns)["channels_email"].transform(lambda x: x.expanding().mean().shift(1))
-    dataf["pct_channel_mobile"] = dataf.groupby(agg_columns)["channels_mobile"].transform(lambda x: x.expanding().mean().shift(1))
-    dataf["pct_channel_social"] = dataf.groupby(agg_columns)["channels_social"].transform(lambda x: x.expanding().mean().shift(1))
-    dataf["pct_channel_web"] = dataf.groupby(agg_columns)["channels_web"].transform(lambda x: x.expanding().mean().shift(1))
+    return dataf
 
-    # Features de engajamento
-    engagement_feats = dataf.groupby(agg_columns).agg(
-        pct_type_bogo=("pct_type_bogo", "last"),                     # % de ofertas tipo bogo
-        pct_type_discount=("pct_type_discount", "last"),             # % de ofertas tipo discount
-        pct_type_informational=("pct_type_informational", "last"),   # % de ofertas tipo informational
-        pct_viewed_offers=("pct_viewed_offers", "last"),             # % de ofertas vizualizadas
-        pct_completed_offers=("pct_completed_offers", "last"),       # % de ofertas completadas
-        pct_channel_email=("pct_channel_email", "last"),             # % de ofertas recebidas via email
-        pct_channel_mobile=("pct_channel_mobile", "last"),           # % de ofertas recebidas via mobile
-        pct_channel_social=("pct_channel_social", "last"),           # % de ofertas recebidas via social media
-        pct_channel_web=("pct_channel_web", "last"),                 # % de ofertas recebidas via web
-    ).reset_index()
+def fill_with_mean(data: pd.DataFrame, features: List[str]):
+    dataf = data.copy() 
+    dataf[features] = dataf.groupby("account_id")[features].transform(lambda x: x.fillna(x.mean()))
     
-    return engagement_feats
+    return dataf
+
+def aggregate_modeling_dataset(data: pd.DataFrame, agg_dict: Dict[str, str], feats_to_fill: List[str]):
+    model_feats = data.copy()
+
+    # Ajusta nome das colunas
+    model_feats.columns = [col.replace(" ", "_") for col in model_feats.columns]
+    
+    for col in feats_to_fill:
+        model_feats[col + "_is_missing"] = model_feats[col].isnull().astype(int)
+
+    # Agrega features
+    model_feats = model_feats.groupby(["account_id", "offer_id"]).agg(agg_dict).reset_index()    
+    model_feats = fill_with_mean(data=model_feats, features=feats_to_fill)
+
+    return model_feats
 
 
-def unify_modeling_dataset(
-        offer_feats: pd.DataFrame, 
-        engagement_feats: pd.DataFrame, 
-        customer_feats: pd.DataFrame,
-        profile_offer_target: pd.DataFrame,
+def uppercut_features(
+        df: pd.DataFrame, features, lower_q: float = 0.01, upper_q: float = 0.99
     ) -> pd.DataFrame:
     """
     """
-    return (
-        offer_feats.merge(customer_feats, on="account_id")
-        .merge(engagement_feats, on="account_id")
-        .merge(profile_offer_target, on=["account_id", "offer_id"])
-    )
+    df_copy = df.copy()
 
+    for feature in features:
+        lower = df_copy[feature].quantile(lower_q)
+        upper = df_copy[feature].quantile(upper_q)
+        df_copy[feature] = df_copy[feature].clip(lower, upper)
+
+    return df_copy
 
 def get_baseline_logloss(y: pd.Series):
     """
@@ -230,6 +248,33 @@ def get_baseline_logloss(y: pd.Series):
 
     baseline_log_loss = -(p1 * np.log(p1) + p0 * np.log(p0))
     logger.info(f"Baseline LogLoss={baseline_log_loss:.4f}")
+
+
+def calculate_precision_recall_at_k(y_true, y_pred_proba, k=100):
+
+    df = pd.DataFrame({"y_true": y_true, "y_score": y_pred_proba})
+    df_sorted = df.sort_values("y_score", ascending=False).head(k)
+
+    precision_at_k = df_sorted["y_true"].sum() / k
+    recall_at_k = df_sorted["y_true"].sum() / df["y_true"].sum()
+
+    logger.info(f"Precision@{k} = {precision_at_k:.4f}")
+    logger.info(f"Recall@{k} = {recall_at_k:.4f}")
+
+    # return precision_at_k, recall_at_k
+
+
+def precision_recall_at_threshold(y_true, y_proba, threshold=0.5):
+    """
+    """
+    y_pred = (y_proba >= threshold).astype(int)
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+
+    logger.info(f"Precision@thr[{threshold:.2f}] = {precision:.4f}")
+    logger.info(f"Recall@thr[{threshold:.2f}] = {recall:.4f}")
+    
+    # return precision, recall
 
 
 def feature_selection(
@@ -248,9 +293,14 @@ def feature_selection(
     X_calib, y_calib = X.iloc[train_end:calib_end], y.iloc[train_end:calib_end] # Conjunto para calibrar
     X_valid, y_valid = X.iloc[calib_end:], y.iloc[calib_end:] # Conjunto para testar
 
-    params_ = {"n_estimators": 60}
+    params_ = {
+        "max_depth": 3,
+        "num_leaves": 8,
+        "n_estimators": 100,
+        "learning_rate": 0.05,
+    }
 
-    lgbm = LGBMClassifier(**params_, random_state=42)
+    lgbm = LGBMClassifier(**params_, random_state=42, verbosity=-1)
     lgbm.fit(X_train, y_train)
 
     # Calibrando o modelo
@@ -317,8 +367,6 @@ def get_roc_auc_curve(y, y_pred):
 
     return fpr, tpr, best_idx, optimal_threshold
 
-    # binary = [1 if pred > optimal_threshold else 0 for pred in y_pred]
-
 
 def get_roc_auc_curve(y, y_pred):
     fpr, tpr, thresholds = roc_curve(y, y_pred)
@@ -333,20 +381,34 @@ def get_roc_auc_curve(y, y_pred):
     binary = [1 if pred > optimal_threshold else 0 for pred in y_pred]
 
     # Complementary metrics
-    # accuracy = accuracy_score(y, binary)
-    # precision = precision_score(y, binary)
-    # recall = recall_score(y, binary)
-    # f_score = f1_score(y, binary)
-    # logloss = log_loss(y, y_pred)
+    precision = precision_score(y, binary)
+    recall = recall_score(y, binary)
 
-    logger.info(" Resulting metrics based on the optimal threshold:")
+    logger.info(" Resulting metrics based on the optimal auc threshold:")
     logger.info(f"Threshold={optimal_threshold:.4f}")
     logger.info(f"AUC={best_auc:.4f}")
-    # logger.info(f"Accuracy={accuracy:.4f}")
-    # logger.info(f"LogLoss={logloss:.4f}")
-    # logger.info(f"Precision={precision:.4f}")
-    # logger.info(f"Recall={recall:.4f}")
-    # logger.info(f"F-Score={f_score:.4f}")
+    logger.info(f"Precision={precision:.4f}")
+    logger.info(f"Recall={recall:.4f}")
 
     plot_roc_auc_curve(fpr, tpr, best_idx)
+    logger.info(f"Percentual de oportunidades aproveitadas: {sum(y_pred >= optimal_threshold) / len(y_pred):.2%}")
     return optimal_threshold
+
+
+def evaluate_potential(data: pd.DataFrame, threshold: float):
+    total_clientes = data["account_id"].nunique()
+    clientes_com_oferta = data[data['pred'] > threshold]["account_id"].nunique()
+    total_ofertas = data["offer_id"].nunique()
+
+    combinacoes_possiveis = total_clientes * total_ofertas
+    combinacoes_testadas = data.drop_duplicates(["account_id", "offer_id"]).shape[0]
+    combinacoes_aprovadas = data[data["pred"] > threshold].drop_duplicates(["account_id", "offer_id"]).shape[0]
+
+    pct_testado = combinacoes_testadas / combinacoes_possiveis
+    pct_aprovacao = combinacoes_aprovadas / combinacoes_testadas
+    pct_clientes_enviados = clientes_com_oferta / total_clientes
+
+    logger.info(f"% de combinações cliente-oferta testadas: {pct_testado:.2%}")
+    logger.info(f"% de combinações cliente-oferta aprovadas: {pct_aprovacao:.2%}")
+    logger.info(f"% clientes com pelo menos uma oferta sugerida: {pct_clientes_enviados:.2%}")
+    logger.info(f"Potencial capturado das combinações cliente-oferta: {combinacoes_aprovadas/combinacoes_possiveis:.2%}")

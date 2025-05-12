@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from loguru import logger
 from typing import Any
 import matplotlib.pyplot as plt
 from sklearn.calibration import calibration_curve
@@ -190,7 +191,7 @@ def plot_calibration_curve(y, preds, threshold):
     ax_hist = ax.twinx()
     ax_hist.hist(preds, bins=15, range=(0, 1), color="#1F618D", alpha=0.15, edgecolor="black")
     ax_hist.set_ylabel("Frequency", fontsize=14)
-    ax_hist.set_yticks([])  # Remove os ticks para não poluir o gráfico
+    ax_hist.set_yticks([])
 
     # Títulos e rótulos
     ax.set_title("Calibration Plot", size=18, weight="bold")
@@ -203,3 +204,46 @@ def plot_calibration_curve(y, preds, threshold):
 
     plt.tight_layout()
     plt.show()
+
+
+def lift_curve_with_threshold(y_true, y_pred_proba, n_bins=10, target_fraction=0.2):
+    fig, ax = plt.subplots(figsize=(25, 6))
+    plt.style.use("ggplot")
+
+    df = pd.DataFrame({"y_true": y_true, "y_score": y_pred_proba})
+    df = df.sort_values("y_score", ascending=False).reset_index(drop=True)
+
+    top_n = int(len(df) * target_fraction)
+    threshold = df.loc[top_n - 1, "y_score"]
+
+    df["bucket"] = pd.qcut(df.index, n_bins, labels=False)
+    lift_table = df.groupby("bucket").agg({"y_true": ["count", "sum"]}).reset_index()
+    lift_table.columns = ["bucket", "total", "positives"]
+    lift_table["cumulative_positives"] = lift_table["positives"].cumsum()
+    lift_table["cumulative_total"] = lift_table["total"].cumsum()
+    lift_table["cumulative_gain"] = lift_table["cumulative_positives"] / df["y_true"].sum()
+    lift_table["baseline_gain"] = lift_table["cumulative_total"] / len(df)
+
+    lift_table = pd.concat([
+        pd.DataFrame({
+            "cumulative_gain": [0],
+            "baseline_gain": [0]
+        }),
+        lift_table[["cumulative_gain", "baseline_gain"]]
+    ], ignore_index=True)
+
+    plt.plot(lift_table["baseline_gain"], lift_table["baseline_gain"], label="Aleatório", linestyle="--", color="darkgrey")
+    plt.plot(lift_table["baseline_gain"], lift_table["cumulative_gain"], label="Modelo", linewidth=2, color="darkred")
+
+    plt.axvline(x=target_fraction, color="black", linestyle=":", label=f"Top {int(target_fraction*100)}%")
+    plt.title("Lift Curve (Ganho Acumulado)", size=16, weight="bold")
+    plt.xlabel("% da base abordada", size=14, fontweight="bold")
+    plt.ylabel("% de conversões capturadas", size=14, fontweight="bold")
+
+    plt.legend(prop={"size": 12})
+    plt.show()
+
+    logger.info(f"Threshold para top {int(target_fraction*100)}% oportunidades: {threshold:.4f}")
+    return threshold
+
+
