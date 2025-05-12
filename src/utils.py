@@ -204,11 +204,13 @@ def build_engagement_features(data: pd.DataFrame, agg_columns: List[str], window
 
     return dataf
 
+
 def fill_with_mean(data: pd.DataFrame, features: List[str]):
     dataf = data.copy() 
     dataf[features] = dataf.groupby("account_id")[features].transform(lambda x: x.fillna(x.mean()))
     
     return dataf
+
 
 def aggregate_modeling_dataset(data: pd.DataFrame, agg_dict: Dict[str, str], feats_to_fill: List[str]):
     model_feats = data.copy()
@@ -240,6 +242,7 @@ def uppercut_features(
 
     return df_copy
 
+
 def get_baseline_logloss(y: pd.Series):
     """
     """
@@ -261,8 +264,6 @@ def calculate_precision_recall_at_k(y_true, y_pred_proba, k=100):
     logger.info(f"Precision@{k} = {precision_at_k:.4f}")
     logger.info(f"Recall@{k} = {recall_at_k:.4f}")
 
-    # return precision_at_k, recall_at_k
-
 
 def precision_recall_at_threshold(y_true, y_proba, threshold=0.5):
     """
@@ -274,7 +275,7 @@ def precision_recall_at_threshold(y_true, y_proba, threshold=0.5):
     logger.info(f"Precision@thr[{threshold:.2f}] = {precision:.4f}")
     logger.info(f"Recall@thr[{threshold:.2f}] = {recall:.4f}")
     
-    # return precision, recall
+    return precision, recall
 
 
 def feature_selection(
@@ -354,6 +355,7 @@ def feature_selection(
     plot_feature_importance(X=X_train, importance_values=perm_importance)
     
     return list(feats_positive.keys())
+
 
 def get_roc_auc_curve(y, y_pred):
     fpr, tpr, thresholds = roc_curve(y, y_pred)

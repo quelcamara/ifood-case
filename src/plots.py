@@ -4,11 +4,13 @@ import itertools
 import numpy as np
 import pandas as pd
 import seaborn as sns
-
-from loguru import logger
-from typing import Any
 import matplotlib.pyplot as plt
+
+from typing import Any
+from loguru import logger
 from sklearn.calibration import calibration_curve
+
+from src.utils import precision_recall_at_threshold
 
 
 def plot_distribution(cohort_series: pd.Series):
@@ -69,6 +71,7 @@ def plot_corr(df, method):
     plt.tight_layout()
     plt.show()
 
+
 def plot_feature_importance(X: pd.DataFrame, importance_values: Any):
     """
     """
@@ -89,6 +92,7 @@ def plot_feature_importance(X: pd.DataFrame, importance_values: Any):
 
     plt.tight_layout()
     plt.show()
+
 
 def plot_roc_auc_curve(fpr, tpr, best_idx):
     plt.figure(figsize=(25, 6))
@@ -115,6 +119,7 @@ def plot_roc_auc_curve(fpr, tpr, best_idx):
     plt.tight_layout()
     plt.show()
 
+
 def plot_summary_shap(shap_values, X, cmap):
     shap.summary_plot(
         shap_values,
@@ -123,6 +128,7 @@ def plot_summary_shap(shap_values, X, cmap):
         cmap=cmap,
         max_display=X.shape[1]
     )
+
 
 def plot_scatter_shap(explanaition, shap_values, X, cmap, scatter_n_top_feats=3):
     importance = np.abs(shap_values).mean(axis=0)
@@ -136,6 +142,7 @@ def plot_scatter_shap(explanaition, shap_values, X, cmap, scatter_n_top_feats=3)
 
     for i, idx in enumerate(top_index):
         shap.plots.scatter(explanaition[:, idx], color=shap_values[:, idx], dot_size=8, alpha=0.7, ax=axes[i], cmap=cmap, show=False)
+
 
 def plot_scatter_permutations_shap(explanaition, shap_values, cmap, scatter_n_top_feats=3):
     importance = np.abs(shap_values).mean(axis=0)
@@ -154,6 +161,7 @@ def plot_scatter_permutations_shap(explanaition, shap_values, cmap, scatter_n_to
         shap_values_feat2 = explanaition[:, feat2]
 
         shap.plots.scatter(shap_values_feat1, shap_values_feat2, dot_size=8, alpha=0.7, ax=axes[i], cmap=cmap, show=False)
+
 
 def visualize_feature_importance(model, X, scatter_n_top_feats: int = 3):
     explainer = shap.Explainer(model.estimator)
@@ -244,6 +252,5 @@ def lift_curve_with_threshold(y_true, y_pred_proba, n_bins=10, target_fraction=0
     plt.show()
 
     logger.info(f"Threshold para top {int(target_fraction*100)}% oportunidades: {threshold:.4f}")
+    precision_recall_at_threshold(y_true, y_pred_proba, threshold)
     return threshold
-
-
