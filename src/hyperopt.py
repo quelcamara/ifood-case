@@ -1,13 +1,11 @@
 import optuna
 import numpy as np
-import pandas as pd
-from lightgbm import LGBMClassifier
 
 from src.utils import get_baseline_logloss
+from src.model import fit, calibrate, validate_model
 
 from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
-from sklearn.model_selection import TimeSeriesSplit, train_test_split
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import train_test_split
 
 from loguru import logger
 
@@ -43,14 +41,10 @@ class RollingWindowOptimizer:
 
         logger.info(" Evaluating best hyperparameters on the test set...")
 
-        model = LGBMClassifier(**self.best_params)
-        model.fit(X_train, y_train)
+        lgbm = fit(X=X_train, y=y_train, params=self.best_params)
+        lgbm_calib = calibrate(model=lgbm, X=X_calib, y=y_calib)
 
-        # Calibrando o modelo
-        model_calib = CalibratedClassifierCV(model, method="isotonic", cv="prefit")
-        model_calib.fit(X_calib, y_calib)
-
-        preds = model_calib.predict_proba(X_valid)[:, 1]
+        preds = lgbm_calib.predict_proba(X_valid)[:, 1]
 
         logloss = log_loss(y_valid, preds)
         auc = roc_auc_score(y_valid, preds)
@@ -60,54 +54,17 @@ class RollingWindowOptimizer:
         logger.success(f"LogLoss: {logloss:.4f} | AUC: {auc:.4f} | Brier: {brier:.4f}")
 
     def train(self, params):
-        X, y = self.data[self.features], self.data[self.target]
+        auc_scores, brier_scores, logloss_scores = validate_model(
+            data=self.data, features=self.features, target=self.target, params=params
+        )
 
-        tscv = TimeSeriesSplit(n_splits=self.n_folds)
-
-        brier_scores = []                   # para avaliar a calibração
-        auc_scores, logloss_scores = [] ,[] # para avaliar o modelo
-
-        for fold, (train_index, valid_index) in enumerate(tscv.split(X)):
-            # logger.info(f"=== Fold {fold + 1}/{self.n_folds} ===")
-
-            X_train, X_temp = X.iloc[train_index], X.iloc[valid_index]
-            y_train, y_temp = y.iloc[train_index], y.iloc[valid_index]
-
-            # Separando um conjunto para testar a calibração
-            split_point = int(len(X_temp) * 0.7)
-            X_calib, X_valid = X_temp.iloc[:split_point], X_temp.iloc[split_point:]
-            y_calib, y_valid = y_temp.iloc[:split_point], y_temp.iloc[split_point:]
-
-            model = LGBMClassifier(**params)
-            model.fit(X_train, y_train)
-
-            # Calibrando o modelo
-            model_calib = CalibratedClassifierCV(model, method="isotonic", cv="prefit")
-            model_calib.fit(X_calib, y_calib)
-
-            preds = model_calib.predict_proba(X_valid)[:, 1]
-
-            logloss = log_loss(y_valid, preds)
-            auc = roc_auc_score(y_valid, preds)
-            brier = brier_score_loss(y_valid, preds)
-
-            auc_scores.append(auc)
-            brier_scores.append(brier)
-            logloss_scores.append(logloss)
-
-            # logger.success(f"LogLoss: {logloss:.4f} | AUC: {auc:.4f} | Brier: {brier:.4f}")
-
-            # logger.info(f" Train from {self.data.loc[train_index, 'registered_on'].min().strftime('%Y-%m-%d')} to {self.data.loc[train_index, 'registered_on'].max().strftime('%Y-%m-%d')}")
-            # logger.info(f" Valid from {self.data.iloc[valid_index].reset_index(drop=True).loc[:split_point, 'registered_on'].min().strftime('%Y-%m-%d')} to {self.data.iloc[valid_index].reset_index(drop=True).loc[:split_point, 'registered_on'].max().strftime('%Y-%m-%d')}")
-            # logger.info(f" Test from {self.data.iloc[valid_index].reset_index(drop=True).loc[split_point:, 'registered_on'].min().strftime('%Y-%m-%d')} to {self.data.iloc[valid_index].reset_index(drop=True).loc[split_point:, 'registered_on'].max().strftime('%Y-%m-%d')}")
-
-        mean_auc = np.mean(auc_scores)
-        mean_brier = np.mean(brier_scores)
-        mean_logloss = np.mean(logloss_scores)
+        mean_auc, var_auc = np.mean(auc_scores), np.var(auc_scores)
+        mean_brier, var_brier = np.mean(brier_scores), np.var(brier_scores)
+        mean_logloss, var_logloss = np.mean(logloss_scores), np.var(logloss_scores)
 
         # get_baseline_logloss(y=y_valid)
         logger.success(
-            f" TRIAL {self.i}: Logloss={mean_logloss:.5f} (σ={np.var(logloss_scores):.5f}) | AUC={mean_auc:.5f} (σ={np.var(auc_scores):.5f}) | Brier={mean_brier:.5f} (σ={np.var(brier_scores):.5f})"
+            f" TRIAL {self.i}: Logloss={mean_logloss:.5f} (σ={var_logloss:.5f}) | AUC={mean_auc:.5f} (σ={var_auc:.5f}) | Brier={mean_brier:.5f} (σ={var_brier:.5f})"
         )
         self.i += 1
         return mean_logloss
