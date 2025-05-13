@@ -57,7 +57,7 @@ A solução foi construída com foco em interpretação e geração de insights 
 - Recall@20%: 0.5569
 - SHAP: Interpretação das principais variáveis de decisão
 
-📈 Insights Relevantes
+## 📈 Insights Relevantes
 - As top 20% melhores combinações cliente-oferta associam pelo menos 01 oferta para mais de 40% dos clientes.
 - Variáveis como `pct_viewed_offers_15d`, `credit_card_limit`, `avg_ticket_15d` se destacaram como preditoras.
 - Políticas de abordagem segmentada por decil de score mostram alto potencial de ganho.
