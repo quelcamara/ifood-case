@@ -253,7 +253,17 @@ def lift_curve_with_threshold(y_true, y_pred_proba, n_bins=10, target_fraction=0
     plt.legend(prop={"size": 12})
     plt.show()
 
+    # Lift @ top 20%
+    positives_top = df.loc[:top_n, "y_true"].sum()
+    conversion_top = positives_top / top_n
+    conversion_overall = df["y_true"].mean()
+    lift_topn = conversion_top / conversion_overall
+
     logger.info(f"Threshold para top {int(target_fraction*100)}% oportunidades: {threshold:.4f}")
+    logger.info(f"Taxa de conversão no top {target_fraction:.0%}: {conversion_top:.4f}")
+    logger.info(f"Taxa de conversão geral: {conversion_overall:.4f}")
+    logger.info(f"Lift no top {target_fraction:.0%}: {lift_topn:.2f}x")
+
     precision_recall_at_threshold(y_true, y_pred_proba, threshold)
     return threshold
 
