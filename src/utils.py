@@ -367,19 +367,6 @@ def get_roc_auc_curve(y, y_pred):
     optimal_threshold = thresholds[best_idx]
     best_auc = gmeans[best_idx]
 
-    return fpr, tpr, best_idx, optimal_threshold
-
-
-def get_roc_auc_curve(y, y_pred):
-    fpr, tpr, thresholds = roc_curve(y, y_pred)
-
-    gmeans = np.sqrt(tpr * (1 - fpr))
-    best_idx = np.argmax(gmeans)
-
-    # Finding optimal threshold
-    optimal_threshold = thresholds[best_idx]
-    best_auc = gmeans[best_idx]
-
     binary = [1 if pred > optimal_threshold else 0 for pred in y_pred]
 
     # Complementary metrics
