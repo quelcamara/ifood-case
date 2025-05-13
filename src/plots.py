@@ -225,8 +225,10 @@ def lift_curve_with_threshold(y_true, y_pred_proba, n_bins=10, target_fraction=0
     threshold = df.loc[top_n - 1, "y_score"]
 
     df["bucket"] = pd.qcut(df.index, n_bins, labels=False)
+    
     lift_table = df.groupby("bucket").agg({"y_true": ["count", "sum"]}).reset_index()
     lift_table.columns = ["bucket", "total", "positives"]
+
     lift_table["cumulative_positives"] = lift_table["positives"].cumsum()
     lift_table["cumulative_total"] = lift_table["total"].cumsum()
     lift_table["cumulative_gain"] = lift_table["cumulative_positives"] / df["y_true"].sum()
@@ -254,3 +256,31 @@ def lift_curve_with_threshold(y_true, y_pred_proba, n_bins=10, target_fraction=0
     logger.info(f"Threshold para top {int(target_fraction*100)}% oportunidades: {threshold:.4f}")
     precision_recall_at_threshold(y_true, y_pred_proba, threshold)
     return threshold
+
+
+def plot_real_conversion_per_decil_score(data):
+    plt.figure(figsize=(25, 6))
+    plt.style.use("ggplot")
+
+    df = data.copy()
+
+    df = df.sort_values("pred", ascending=False).reset_index(drop=True)
+    df["decil"] = pd.qcut(df.index, q=10, labels=[f"{i+1}" for i in range(10)])
+
+    summary = df.groupby("decil").agg(
+        total=("target", "count"),
+        conversoes=("target", "sum")
+    ).reset_index()
+    summary["taxa_conversao"] = summary["conversoes"] / summary["total"]
+
+    plt.bar(summary["decil"], summary["taxa_conversao"], color="darkred")
+
+    plt.title("Taxa de Conversão Real por Decil do Score", fontsize=18, weight="bold")
+    plt.xlabel("Decil", size=16, fontweight="bold")
+    plt.ylabel("Taxa de Conversão Real", size=16, fontweight="bold")
+    
+    plt.yticks(fontsize=14)
+    plt.xticks(fontsize=14)
+    
+    plt.tight_layout()
+    plt.show()
