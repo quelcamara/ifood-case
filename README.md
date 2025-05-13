@@ -65,7 +65,7 @@ A solução foi construída com foco em interpretação e geração de insights 
 ## 🚀 Como Rodar
 1. Clone o repositório:
 ```
-git clone https://github.com/seuusuario/ifood-case.git
+git clone https://github.com/quelcamara/ifood-case.git
 cd ifood-case
 ```
 
